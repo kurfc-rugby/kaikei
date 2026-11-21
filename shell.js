@@ -1,6 +1,7 @@
 // 会計アプリの入口：会計アプリ（Apps Script のWebアプリ）を全画面で表示し、
 // ホーム画面への追加と通知（Web Push）の受け取りを受け持つ。会計のデータはここには来ない。
-// 会計アプリとはメッセージでやり取りする（相手の場所 KAIKEI.APP_ORIGIN を必ず確かめる）。
+// 会計アプリの画面は app.html（boot.js）が出す。画面のファイルは端末に覚えておき（ui.js）、新しい版はあとで受け取る。
+// 会計アプリとはメッセージでやり取りする（相手が自分の枠の中の画面かを必ず確かめる）。
 (function () {
   'use strict';
   const C = self.KAIKEI;
@@ -20,8 +21,10 @@
     const q = new URLSearchParams(location.search);
     const out = new URLSearchParams({ shell: '1' });
     ['go', 'pair', 'pw'].forEach((k) => { const v = q.get(k); if (v && /^[\w-]{1,40}$/.test(v)) out.set(k, v); });
-    return C.APP + (C.APP.indexOf('?') >= 0 ? '&' : '?') + out.toString();
+    return 'app.html?' + out.toString();
   }
+  // 枠の中が、端末に覚えた画面（この入口と同じ場所の app.html）か。Apps Script のページなら false
+  function cachedMode() { try { return frame.contentWindow.location.origin === location.origin; } catch (e) { return false; } }
   let shown = false;
   function show() {
     if (shown) return;
@@ -40,11 +43,37 @@
     clearTimeout(load.t);
     load.t = setTimeout(() => {
       if (shown) return;
+      // 覚えた画面が動かないときに備えて、次の「もう一度読み込む」ではサーバーから受け取り直す
+      if (cachedMode()) KaikeiUI.forget();
       waitMsg.textContent = navigator.onLine === false ? '電波がありません。電波のよい所で、もう一度読み込んでください。' : '読み込みに時間がかかっています。もう少し待つか、もう一度読み込んでください。';
       waitMsg.hidden = false; retry.hidden = false;
     }, 15000);
   }
-  frame.addEventListener('load', () => setTimeout(show, 250));
+  // 覚えた画面は、アプリからのあいさつ（すぐ来る）で見せる。届かなくても少し待てば見せる
+  frame.addEventListener('load', () => setTimeout(show, cachedMode() ? 3000 : 250));
+
+  // ---- 画面の新しい版（会計アプリを直したとき）：裏で受け取り、次に開いたときから使う ----
+  const upd = document.getElementById('upd');
+  let lastCheck = 0, checking = false;
+  async function checkUpdate() {
+    if (checking || !self.KaikeiUI) return;
+    checking = true;
+    lastCheck = Date.now();
+    try {
+      const shownCached = cachedMode();
+      const x = await KaikeiUI.update(await KaikeiUI.get());
+      // いま覚えた画面を見ているときだけ知らせる（Apps Script のページなら、次に開いたときに自然に切り替わる）
+      if (x && shownCached && upd) upd.hidden = false;
+    } catch (e) { /* 電波がないなど：次に開いたときに */ }
+    checking = false;
+  }
+  if (upd) {
+    document.getElementById('updGo').addEventListener('click', () => { upd.hidden = true; load(); });
+    document.getElementById('updX').addEventListener('click', () => { upd.hidden = true; });
+  }
+  document.addEventListener('visibilitychange', () => {
+    if (document.visibilityState === 'visible' && Date.now() - lastCheck > 3600 * 1000) checkUpdate();
+  });
   retry.addEventListener('click', load);
 
   // ---- 通知の準備（Service Worker） ----
@@ -117,6 +146,7 @@
 
   // ---- 会計アプリとのメッセージ ----
   function fromApp(e) {
+    if (e.origin === location.origin) return !!e.source && e.source === frame.contentWindow;
     if (!C.APP_ORIGIN.test(e.origin)) return false;
     // 自分が開いた会計アプリの中のページだけ（ほかのウィンドウからのものは受け付けない）
     try { return !!e.source && e.source.top === window && e.source !== window; } catch (x) { return false; }
@@ -149,4 +179,5 @@
   window.addEventListener('appinstalled', () => { installEvt = null; if (app) info().then((i) => toApp('info', i)); });
 
   load();
+  setTimeout(checkUpdate, 5000);
 })();
